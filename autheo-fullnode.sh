@@ -82,6 +82,14 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 ############################
+# Ensure Environment Variables
+############################
+
+export HOME="${HOME:-/root}"
+export GOPATH="${HOME}/go"
+export GOMODCACHE="${GOPATH}/pkg/mod"
+
+############################
 # OS / Architecture check
 ############################
 
@@ -284,7 +292,7 @@ cd "${BUILD_DIR}"
 
 log "Building autheod..."
 
-make build
+HOME="/root" GOPATH="/root/go" GOMODCACHE="/root/go/pkg/mod" make build
 
 if [[ ! -x "${BUILD_DIR}/build/autheod" ]]; then
     die "Build completed but ${BUILD_DIR}/build/autheod was not created."
