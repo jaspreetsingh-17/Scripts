@@ -15,9 +15,13 @@ IFS=$'\n\t'
 #   Autheo Mainnet
 #   systemd
 #
+# User/Group:
+#   autheo:autheo
+#
 # Installation:
 #   /usr/local/bin/autheod
 #   /data/.autheo
+#   /home/autheo/.autheo -> /data/.autheo
 #   /root/.autheo -> /data/.autheo
 #
 # Service:
@@ -33,11 +37,14 @@ GO_ARCHIVE="go${GO_VERSION}.linux-amd64.tar.gz"
 GO_URL="https://go.dev/dl/${GO_ARCHIVE}"
 GO_SHA256_URL="https://dl.google.com/go/${GO_ARCHIVE}.sha256"
 
+AUTHEO_USER="autheo"
+AUTHEO_GROUP="autheo"
+
 AUTHEO_REPO="https://github.com/autheo-blockchain/autheo-chain-core.git"
 NETWORK_REPO="https://github.com/autheo-blockchain/networks.git"
 
 AUTHEO_HOME="/data/.autheo"
-AUTHEO_LINK="/root/.autheo"
+AUTHEO_ROOT_LINK="/root/.autheo"
 
 CHAIN_ID="autheo_2127-1"
 NODE_NAME="new-node"
@@ -92,6 +99,30 @@ fi
 
 log "Detected OS: ${PRETTY_NAME}"
 log "Detected architecture: ${ARCH}"
+
+############################
+# Create System User & Group
+############################
+
+log "Setting up system group and user..."
+
+if ! getent group "${AUTHEO_GROUP}" >/dev/null 2>&1; then
+    groupadd --system "${AUTHEO_GROUP}"
+    log "Created group: ${AUTHEO_GROUP}"
+fi
+
+if ! id -u "${AUTHEO_USER}" >/dev/null 2>&1; then
+    useradd --system \
+        --gid "${AUTHEO_GROUP}" \
+        --create-home \
+        --home-dir "/home/${AUTHEO_USER}" \
+        --shell /bin/false \
+        "${AUTHEO_USER}"
+    log "Created user: ${AUTHEO_USER}"
+fi
+
+AUTHEO_USER_HOME="/home/${AUTHEO_USER}"
+AUTHEO_USER_LINK="${AUTHEO_USER_HOME}/.autheo"
 
 ############################
 # Required packages
@@ -208,30 +239,32 @@ log "Go version:"
 log "Preparing Autheo data directory..."
 
 mkdir -p "${AUTHEO_HOME}"
+chown -R "${AUTHEO_USER}:${AUTHEO_GROUP}" "${AUTHEO_HOME}"
 chmod 0700 "${AUTHEO_HOME}"
 
 ############################
-# Create /root/.autheo symlink
+# Create Symlinks
 ############################
 
-if [[ -L "${AUTHEO_LINK}" ]]; then
-
-    CURRENT_TARGET="$(readlink -f "${AUTHEO_LINK}")"
-
-    if [[ "${CURRENT_TARGET}" != "${AUTHEO_HOME}" ]]; then
-        die "${AUTHEO_LINK} exists but points to ${CURRENT_TARGET}, not ${AUTHEO_HOME}."
-    fi
-
-elif [[ -e "${AUTHEO_LINK}" ]]; then
-
-    die "${AUTHEO_LINK} already exists and is not the expected symlink."
-
-else
-
-    ln -s "${AUTHEO_HOME}" "${AUTHEO_LINK}"
+# Create symlink for autheo user home
+if [[ ! -L "${AUTHEO_USER_LINK}" ]] && [[ ! -e "${AUTHEO_USER_LINK}" ]]; then
+    ln -s "${AUTHEO_HOME}" "${AUTHEO_USER_LINK}"
+    chown -h "${AUTHEO_USER}:${AUTHEO_GROUP}" "${AUTHEO_USER_LINK}"
 fi
 
-log "Autheo home: $(readlink -f "${AUTHEO_LINK}")"
+# Create symlink for root
+if [[ -L "${AUTHEO_ROOT_LINK}" ]]; then
+    CURRENT_TARGET="$(readlink -f "${AUTHEO_ROOT_LINK}")"
+    if [[ "${CURRENT_TARGET}" != "${AUTHEO_HOME}" ]]; then
+        die "${AUTHEO_ROOT_LINK} exists but points to ${CURRENT_TARGET}, not ${AUTHEO_HOME}."
+    fi
+elif [[ -e "${AUTHEO_ROOT_LINK}" ]]; then
+    die "${AUTHEO_ROOT_LINK} already exists and is not the expected symlink."
+else
+    ln -s "${AUTHEO_HOME}" "${AUTHEO_ROOT_LINK}"
+fi
+
+log "Autheo home: $(readlink -f "${AUTHEO_ROOT_LINK}")"
 
 ############################
 # Clone / update Autheo source
@@ -288,11 +321,9 @@ log "Checking Autheo node initialization..."
 if [[ ! -f "${AUTHEO_HOME}/config/config.toml" ]] || \
    [[ ! -f "${AUTHEO_HOME}/config/app.toml" ]]; then
 
-    log "Initializing Autheo node..."
+    log "Initializing Autheo node as ${AUTHEO_USER}..."
 
-    "${AUTHEO_BINARY}" init \
-        "${NODE_NAME}" \
-        --chain-id="${CHAIN_ID}"
+    su -s /bin/bash "${AUTHEO_USER}" -c "${AUTHEO_BINARY} init '${NODE_NAME}' --chain-id='${CHAIN_ID}' --home '${AUTHEO_HOME}'"
 
 else
     log "Autheo node is already initialized."
@@ -328,7 +359,7 @@ fi
 
 log "Installing mainnet genesis.json..."
 
-install -o root -g root -m 0644 \
+install -o "${AUTHEO_USER}" -g "${AUTHEO_GROUP}" -m 0644 \
     "${MAINNET_DIR}/genesis.json" \
     "${AUTHEO_HOME}/config/genesis.json"
 
@@ -450,6 +481,14 @@ path.write_text("\n".join(lines) + "\n")
 PY
 
 ############################
+# Fix Data Directory Permissions
+############################
+
+log "Enforcing permissions on ${AUTHEO_HOME}..."
+
+chown -R "${AUTHEO_USER}:${AUTHEO_GROUP}" "${AUTHEO_HOME}"
+
+############################
 # Validate configuration
 ############################
 
@@ -469,7 +508,7 @@ grep -Eq '^[[:space:]]*minimum-gas-prices[[:space:]]*=' \
 
 log "Creating systemd service..."
 
-cat > "${SERVICE_FILE}" <<'EOF'
+cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=Autheo Mainnet Full Node Daemon
 After=network-online.target
@@ -477,10 +516,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=${AUTHEO_USER}
+Group=${AUTHEO_GROUP}
 
-ExecStart=/usr/local/bin/autheod start --pruning=default --log_level info --json-rpc.address=0.0.0.0:8545
+ExecStart=/usr/local/bin/autheod start --home=/data/.autheo --pruning=default --log_level info --json-rpc.address=0.0.0.0:8545
 
 Restart=on-failure
 RestartSec=5
@@ -554,6 +593,7 @@ rm -rf "${NETWORK_DIR}"
 log "======================================================"
 log "Autheo mainnet full node installation completed."
 log "======================================================"
+log "User/Group:   ${AUTHEO_USER}:${AUTHEO_GROUP}"
 log "Binary:       ${AUTHEO_BINARY}"
 log "Data:         ${AUTHEO_HOME}"
 log "Chain ID:     ${CHAIN_ID}"
